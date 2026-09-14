@@ -105,7 +105,8 @@ def check_coordination(doc: ProjectDoc, overrides: dict[str, str] | None = None)
             continue
         up = views[up_branch.device_id]
 
-        fc = fault.get(branch.from_node)
+        # 故障电流范围取支路实际受保护的下游节点（to_node），而非电源侧母线
+        fc = fault.get(branch.to_node)
         load = loads.get(branch.load_id) if branch.load_id else None
         i_load = load.current if load else 0.0
         pair = {"downstream": down.device.id, "upstream": up.device.id,
