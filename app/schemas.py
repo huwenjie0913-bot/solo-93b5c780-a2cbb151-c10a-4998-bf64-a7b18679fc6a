@@ -133,3 +133,23 @@ class SandboxRequest(BaseModel):
     doc: Optional[ProjectDoc] = None
     fixed: dict[str, str] = Field(default_factory=dict)  # device_id -> setting_name
     search: SandboxSearch
+
+
+class BackupCheckScenario(BaseModel):
+    """单个拒动后备场景：故障节点处故障、指定设备拒动，要求在最大允许清除时间内切除。
+
+    max_clear_time 按文档级 units.time 声明的单位录入，导入校验阶段换算为秒。
+    """
+
+    name: Optional[str] = None
+    fault_node: str
+    refused_device: str
+    max_clear_time: float = Field(gt=0)
+
+
+class BackupCheckRequest(BaseModel):
+    """一次提交多个拒动后备校核场景；不给 doc 时引用当前基线方案。"""
+
+    doc: Optional[ProjectDoc] = None
+    label: Optional[str] = None
+    scenarios: list[BackupCheckScenario] = Field(min_length=1)

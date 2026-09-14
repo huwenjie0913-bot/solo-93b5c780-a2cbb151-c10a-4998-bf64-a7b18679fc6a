@@ -83,3 +83,20 @@ def nearest_upstream_protection(topo: Topology, branch_id: str):
         if b.device_id:
             return b
     return None
+
+
+def path_branches(topo: Topology, node_id: str) -> list:
+    """径向拓扑下，从故障节点向电源方向依次经过的支路（离故障最近者在前）。
+
+    每条非电源节点在径向拓扑中只有唯一入线；节点不在拓扑中或为电源点时
+    返回空列表。配合 guard 防止数据异常（成环）导致死循环。
+    """
+    incoming = {b.to_node: b for b in topo.branches}
+    path = []
+    current = incoming.get(node_id)
+    guard = 0
+    while current is not None and guard <= len(topo.branches):
+        path.append(current)
+        current = incoming.get(current.from_node)
+        guard += 1
+    return path

@@ -34,6 +34,15 @@ def _connect() -> sqlite3.Connection:
             result_json TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS backup_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER,
+            label TEXT,
+            rules_version TEXT NOT NULL,
+            input_json TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
         """
     )
     return conn
@@ -95,6 +104,45 @@ def list_snapshots() -> list[dict]:
         rows = conn.execute(
             "SELECT id, project_id, label, rules_version, created_at, result_json"
             " FROM snapshots ORDER BY id DESC"
+        ).fetchall()
+    return [{"id": r["id"], "project_id": r["project_id"], "label": r["label"],
+             "rules_version": r["rules_version"], "created_at": r["created_at"],
+             "summary": json.loads(r["result_json"])["summary"]} for r in rows]
+
+
+def save_backup_batch(project_id: int | None, label: str | None, rules_version: str,
+                      payload: dict, result: dict) -> int:
+    """保存拒动后备校核批次快照：完整输入（文档+场景）与规则版本。"""
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO backup_batches (project_id, label, rules_version, input_json, result_json, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (project_id, label, rules_version,
+             json.dumps(payload, ensure_ascii=False),
+             json.dumps(result, ensure_ascii=False), _now()),
+        )
+        return cur.lastrowid
+
+
+def get_backup_batch(batch_id: int) -> dict | None:
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM backup_batches WHERE id = ?", (batch_id,)
+        ).fetchone()
+    if not row:
+        return None
+    return {"id": row["id"], "project_id": row["project_id"], "label": row["label"],
+            "rules_version": row["rules_version"],
+            "input": json.loads(row["input_json"]),
+            "result": json.loads(row["result_json"]),
+            "created_at": row["created_at"]}
+
+
+def list_backup_batches() -> list[dict]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, project_id, label, rules_version, created_at, result_json"
+            " FROM backup_batches ORDER BY id DESC"
         ).fetchall()
     return [{"id": r["id"], "project_id": r["project_id"], "label": r["label"],
              "rules_version": r["rules_version"], "created_at": r["created_at"],
