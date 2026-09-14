@@ -24,6 +24,8 @@ class Branch(BaseModel):
     to_node: str
     device_id: Optional[str] = None
     load_id: Optional[str] = None
+    # 支路上关联的受保护设备（电缆、变压器等），可多个
+    protected_device_ids: list[str] = Field(default_factory=list)
 
 
 class Topology(BaseModel):
@@ -67,6 +69,29 @@ class DeviceSetting(BaseModel):
     segments: list[Segment] = Field(min_length=1)
 
 
+class DamagePoint(BaseModel):
+    """耐受曲线上的一点：电流 I 下设备允许的最长持续时间。"""
+
+    i: float = Field(gt=0)
+    t: float = Field(gt=0)
+
+
+class DamageTolerance(BaseModel):
+    current_pct: float = Field(default=0.0, ge=0, le=0.5)
+    time_pct: float = Field(default=0.0, ge=0, le=0.9)
+
+
+class ProtectedDevice(BaseModel):
+    """支路上的受保护设备（电缆/变压器等），按电流—允许持续时间定义损伤曲线。"""
+
+    id: str
+    name: Optional[str] = None
+    type: Literal["cable", "transformer", "busbar", "other"] = "cable"
+    branch_id: str
+    damage_curve: list[DamagePoint] = Field(min_length=2)
+    tolerance: DamageTolerance = DamageTolerance()
+
+
 class Device(BaseModel):
     id: str
     name: Optional[str] = None
@@ -85,6 +110,7 @@ class ProjectDoc(BaseModel):
     loads: list[Load] = Field(default_factory=list)
     fault_currents: list[FaultCurrent]
     devices: list[Device] = Field(min_length=1)
+    protected_devices: list[ProtectedDevice] = Field(default_factory=list)
 
 
 class CheckRequest(BaseModel):

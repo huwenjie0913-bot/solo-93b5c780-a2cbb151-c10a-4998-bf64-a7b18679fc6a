@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from . import rules
-from .curves import CurveError, validate_segment_curve
+from .curves import CurveError, validate_monotonic_points, validate_segment_curve
 from .schemas import ProjectDoc
 from .topology import TopologyError, validate_topology
 from .units import UnitError, current_factor, time_factor
@@ -37,6 +37,10 @@ def normalize_units(doc: ProjectDoc) -> None:
                 for p in seg.points:
                     p.i *= ci
                     p.t *= ti
+    for pdev in doc.protected_devices:
+        for p in pdev.damage_curve:
+            p.i *= ci
+            p.t *= ti
     doc.units.current = "A"
     doc.units.time = "s"
 
@@ -58,6 +62,10 @@ def validate_document(doc: ProjectDoc) -> list[str]:
     load_ids = {l.id for l in doc.loads}
     if len(load_ids) != len(doc.loads):
         errors.append("负载 id 重复")
+    protected_ids = {p.id for p in doc.protected_devices}
+    if len(protected_ids) != len(doc.protected_devices):
+        errors.append("受保护设备 id 重复")
+    branch_ids = {b.id for b in doc.topology.branches}
 
     # 负载字段完整性
     for load in doc.loads:
@@ -74,11 +82,36 @@ def validate_document(doc: ProjectDoc) -> list[str]:
         if fc.max < fc.min:
             errors.append(f"节点 {fc.node_id} 故障电流范围颠倒: min={fc.min} > max={fc.max}")
 
-    # 拓扑连通性与引用完整性
+    # 拓扑连通性与引用完整性（含支路对受保护设备的引用）
     try:
-        validate_topology(doc.topology, device_ids, load_ids)
+        validate_topology(doc.topology, device_ids, load_ids, protected_ids)
     except TopologyError as e:
         errors.append(str(e))
+
+    # 受保护设备：支路引用、损伤曲线单调性
+    referenced_protected: set[str] = set()
+    for b in doc.topology.branches:
+        referenced_protected.update(b.protected_device_ids)
+    for pdev in doc.protected_devices:
+        if pdev.branch_id not in branch_ids:
+            errors.append(f"受保护设备 {pdev.id} 引用了不存在的支路 {pdev.branch_id}")
+        if pdev.branch_id in branch_ids:
+            assoc = [b for b in doc.topology.branches
+                     if pdev.id in b.protected_device_ids and b.id != pdev.branch_id]
+            for b in assoc:
+                errors.append(
+                    f"受保护设备 {pdev.id} 的 branch_id={pdev.branch_id} "
+                    f"与实际关联支路 {b.id} 不一致")
+            if pdev.id not in referenced_protected:
+                errors.append(
+                    f"受保护设备 {pdev.id} 声明在支路 {pdev.branch_id} 上，"
+                    f"但该支路未关联它")
+        try:
+            validate_monotonic_points(
+                pdev.damage_curve,
+                f"受保护设备 {pdev.id}（{pdev.type}）损伤曲线")
+        except CurveError as e:
+            errors.append(str(e))
 
     # 除电源点外的每个节点都必须给出故障电流范围
     for node in doc.topology.nodes:

@@ -42,25 +42,37 @@ def run_sandbox(doc: ProjectDoc, req: SandboxRequest) -> dict:
 
     feasible: list[dict] = []
     infeasible: list[dict] = []
+    undetermined_only: list[dict] = []
     keys = sorted(candidates)
     for combo in itertools.product(*(candidates[k] for k in keys)):
         overrides = dict(req.fixed)
         overrides.update(dict(zip(keys, combo)))
         result = check_coordination(doc, overrides)
         entry = {"settings": dict(zip(keys, combo)), "summary": result["summary"]}
+        und = result.get("undetermined", [])
         if result["conflicts"]:
+            # 含热耐受/选择性硬冲突的组合一律不可行；即使同时带未判定项也归此列
             entry["conflicts"] = result["conflicts"]
+            if und:
+                entry["undetermined"] = und
             infeasible.append(entry)
+        elif und:
+            # 无硬冲突但存在未判定项：不能列为可行，单独返回
+            entry["undetermined"] = und
+            undetermined_only.append(entry)
         else:
             feasible.append(entry)
 
     # 仍无法消除冲突时，按冲突数、最差裕量给出最接近可行的组合
     infeasible.sort(key=lambda e: (e["summary"]["conflict_count"],
                                    -(e["summary"]["worst_margin_s"] or -1e9)))
+    undetermined_only.sort(key=lambda e: e["summary"]["undetermined_count"])
     return {
         "evaluated": total,
         "feasible_count": len(feasible),
         "feasible": feasible,
+        "undetermined": undetermined_only[:5],
+        "undetermined_count": len(undetermined_only),
         "remaining_conflicts": [] if feasible else infeasible[:5],
         "baseline_modified": False,
     }
