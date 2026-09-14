@@ -103,6 +103,34 @@ def test_protection_curve_gap_is_undetermined(client):
     assert und[0]["undetermined_current_range"]["to"] == 8000.0
 
 
+def test_fault_above_curve_end_with_current_tolerance_does_not_crash(client):
+    """回归：故障电流越过保护曲线末端且带电流容差时，边界采样点可能因
+    log/exp 浮点往返越界而让 max() 作用于空序列（ValueError）。
+    现应按未覆盖规则判未判定，整次校核不中断。"""
+    doc = good_doc()
+    # 无保护下游支路挂电缆，最近上游保护为 CB2，曲线止于 10000A、电流容差 10%
+    doc["topology"]["nodes"].append({"id": "B4"})
+    doc["topology"]["branches"].append(
+        {"id": "br3", "from_node": "B2", "to_node": "B4",
+         "protected_device_ids": ["CAB1"]})
+    doc["fault_currents"].append({"node_id": "B4", "min": 9000, "max": 12000})
+    doc["devices"][1]["settings"][0]["segments"] = [
+        seg("overload", [(100, 10), (1000, 1), (10000, 0.1)], cur_tol=0.1),
+        seg("short_circuit", [(2000, 0.2), (10000, 0.05)], cur_tol=0.1)]
+    doc["protected_devices"] = [
+        {"id": "CAB1", "type": "cable", "branch_id": "br3",
+         "damage_curve": [{"i": 1000, "t": 50}, {"i": 20000, "t": 0.5}]}]
+    r = client.post("/checks", json={"doc": doc})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    und = [u for u in body["undetermined"] if u["protected_device"] == "CAB1"]
+    assert und
+    # 保护覆盖上界 10000/(1-0.1) ≈ 11111.1A；超出段判未判定而非抛错
+    rng = und[-1]["undetermined_current_range"]
+    assert abs(rng["from"] - 11111.111) < 0.05
+    assert rng["to"] == 12000.0
+
+
 def test_no_upstream_protection_is_undetermined(client):
     doc = good_doc()
     # 摘掉电源支路 br0 的 CB1，把电缆挂到 br0：其自身与上游链上均无保护

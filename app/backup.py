@@ -152,17 +152,26 @@ def _evaluate_scenario(doc: ProjectDoc, views: dict[str, DeviceView],
                        clear_t_hi(i_lo), i_lo, over_limit, [])
 
     # 按各保护段（叠加电流容差后）的覆盖边界切割故障区间，覆盖性在切出的
-    # 小区间内恒定；容差会收缩可判定范围。
+    # 小区间内恒定；容差会收缩可判定范围。切点必须与 covers_current 谓词
+    # （I*(1-ct) 落在录入点范围内）严格一致，否则中点分类会把实际未覆盖的
+    # 小区间当成覆盖区，采样到该段时 max() 作用于空序列而中断整批。
     cuts = {i_lo, i_hi}
     for b in seg_bands:
         d_lo, d_hi = b.i_domain
         cuts.add(min(i_hi, max(i_lo, d_lo / (1.0 - b.cur_tol))))
-        cuts.add(max(i_lo, min(i_hi, d_hi / (1.0 + b.cur_tol))))
+        cuts.add(max(i_lo, min(i_hi, d_hi / (1.0 - b.cur_tol))))
     cuts = sorted(c for c in cuts if i_lo <= c <= i_hi)
 
     over_limit: list[tuple[float, float]] = []
     und_ranges: list[tuple[float, float]] = []
     worst_t, worst_i = -math.inf, None
+
+    def cell_clear_t_hi(i, active):
+        # active 为该覆盖小区间中点处适用的保护段集合。切点经 log/exp 往返
+        # 可能有一个机器误差的越界，导致边界采样点按谓词落入“无段覆盖”；
+        # 此时回退到该小区间的适用段（插值在端点外钳制，时间连续等于边界值）。
+        bands = [b for b in seg_bands if b.covers_current(i)] or active
+        return max(b.t_hi(i) for b in bands)
 
     k = 0
     while k < len(cuts) - 1:
@@ -170,10 +179,12 @@ def _evaluate_scenario(doc: ProjectDoc, views: dict[str, DeviceView],
         if c <= a:
             k += 1
             continue
-        if not covers(math.sqrt(a * c)):
+        active = [b for b in seg_bands if b.covers_current(math.sqrt(a * c))]
+        if not active:
             # 合并相邻的未覆盖段
             j = k
-            while j < len(cuts) - 1 and not covers(math.sqrt(cuts[j] * cuts[j + 1])):
+            while j < len(cuts) - 1 and \
+                    not [b for b in seg_bands if b.covers_current(math.sqrt(cuts[j] * cuts[j + 1]))]:
                 j += 1
             und_ranges.append((a, cuts[j]))
             k = j
@@ -183,19 +194,19 @@ def _evaluate_scenario(doc: ProjectDoc, views: dict[str, DeviceView],
         n = rules.SAMPLE_POINTS
         for q in range(n + 1):
             i = math.exp(math.log(a) + q / n * (math.log(c) - math.log(a)))
-            t = clear_t_hi(i)
+            t = cell_clear_t_hi(i, active)
             if t > worst_t * (1 + 1e-12):
                 worst_t, worst_i = t, i
 
         def margin(log_i):
-            return scenario.max_clear_time - clear_t_hi(math.exp(log_i))
+            return scenario.max_clear_time - cell_clear_t_hi(math.exp(log_i), active)
 
         ranges, minima = _scan_margin(margin, a, c, 0.0)
         over_limit.extend(ranges)
         # 扫描网格里的最差余量点同样参与最慢清除时间统计
         for _, mat in minima:
             if mat is not None:
-                t = clear_t_hi(mat)
+                t = cell_clear_t_hi(mat, active)
                 if t > worst_t * (1 + 1e-12):
                     worst_t, worst_i = t, mat
         k += 1
@@ -225,7 +236,6 @@ def run_backup_checks(doc: ProjectDoc, scenarios: list[ScenarioInput]) -> dict:
     device_ids = {d.id for d in doc.devices}
     fault = {f.node_id: f for f in doc.fault_currents}
 
-    seen = set()
     for s in scenarios:
         if s.fault_node not in node_ids:
             errors.append(f"场景 {s.name or s.fault_node!r}: 故障节点 {s.fault_node!r} 不存在")
@@ -233,10 +243,6 @@ def run_backup_checks(doc: ProjectDoc, scenarios: list[ScenarioInput]) -> dict:
             errors.append(f"场景 {s.name or s.fault_node!r}: 故障节点 {s.fault_node!r} 缺少故障电流范围")
         if s.refused_device not in device_ids:
             errors.append(f"场景 {s.name or s.fault_node!r}: 拒动设备 {s.refused_device!r} 不存在")
-        key = (s.fault_node, s.refused_device)
-        if key in seen:
-            errors.append(f"场景 {s.name or s.fault_node!r}: 故障节点/拒动设备组合重复 {key}")
-        seen.add(key)
     if errors:
         raise BackupCheckError(errors)
 

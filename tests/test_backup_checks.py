@@ -153,6 +153,66 @@ def test_current_tolerance_shrinks_backup_coverage(client):
     assert abs(lo - 5555.556) < 0.05
 
 
+def _high_fault_doc():
+    """B2 故障 18000~23000A，后备 CB1 曲线止于 20000A，电流容差 10%。"""
+    doc = good_doc()
+    doc["fault_currents"] = [
+        {"node_id": "B1", "min": 3000, "max": 15000},
+        {"node_id": "B2", "min": 18000, "max": 23000},
+        {"node_id": "B3", "min": 2000, "max": 8000},
+    ]
+    doc["devices"][0]["settings"][0]["segments"] = [
+        seg("overload", [(500, 100), (5000, 10), (20000, 1)], cur_tol=0.1),
+        seg("short_circuit", [(5000, 0.5), (20000, 0.2)], cur_tol=0.1)]
+    return doc
+
+
+def test_fault_above_curve_end_with_current_tolerance_is_undetermined(client):
+    """回归：故障 18000~23000A、曲线止于 20000A、电流容差 10% 时，
+    旧实现切点与覆盖谓词口径不一致，扫描到 23000A 抛
+    ValueError: max() arg is an empty sequence 中断整批；
+    现应按覆盖规则判为未判定，且覆盖子区间仍给出最慢清除时间。"""
+    doc = _high_fault_doc()
+    r = client.post("/backup-checks", json={"doc": doc, "scenarios": [
+        {"name": "高故障", "fault_node": "B2", "refused_device": "CB2",
+         "max_clear_time": 30}]})
+    assert r.status_code == 201, r.json()
+    body = r.json()
+    s = body["scenarios"][0]
+    assert s["status"] == "undetermined"
+    assert s["reason"] == "protection_curve_uncovered"
+    assert s["backup_protection"] == "CB1"
+    # 覆盖上界按负偏差取点：20000/(1-0.1) ≈ 22222.2A，超出部分未判定
+    und = s["undetermined_current_ranges"]
+    assert len(und) == 1
+    assert abs(und[0]["from"] - 22222.222) < 0.05
+    assert und[0]["to"] == 23000.0
+    # 覆盖段 [18000, 22222.2] 仍给出最慢清除时间（18000 处最慢），不计作通过
+    assert s["slowest_clear_time_s"] is not None
+    assert s["slowest_at_current"] == 18000.0
+    assert body["summary"]["pass_count"] == 0
+    assert body["summary"]["undetermined_count"] == 1
+
+
+def test_fault_entirely_above_curve_end_with_tolerance_is_undetermined(client):
+    """回归：整个故障区间都在容差覆盖上界之外时，应整段未判定而非抛错。
+    覆盖上界 20000/(1-0.1) ≈ 22222.2A，故障取 22500~23000A。"""
+    doc = _high_fault_doc()
+    for fc in doc["fault_currents"]:
+        if fc["node_id"] == "B2":
+            fc["min"], fc["max"] = 22500, 23000
+    r = client.post("/backup-checks", json={"doc": doc, "scenarios": [
+        {"fault_node": "B2", "refused_device": "CB2", "max_clear_time": 30}]})
+    assert r.status_code == 201, r.json()
+    s = r.json()["scenarios"][0]
+    assert s["status"] == "undetermined"
+    assert s["reason"] == "protection_curve_uncovered"
+    assert s["undetermined_current_ranges"] == [{"from": 22500.0, "to": 23000.0}]
+    assert s["slowest_clear_time_s"] is None
+    assert s["time_margin_s"] is None
+    assert s["over_limit_current_ranges"] == []
+
+
 def test_time_tolerance_makes_slowest_clearing_slower(client):
     doc = good_doc()
     cb1 = doc["devices"][0]
@@ -181,10 +241,28 @@ def test_unknown_refused_device_returns_422(client):
     assert any("NOPE" in e for e in r.json()["errors"])
 
 
-def test_duplicate_scenario_returns_422(client):
-    r = client.post("/backup-checks",
-                    json={"doc": good_doc(), "scenarios": [_sc("a"), _sc("b")]})
-    assert r.status_code == 422
+def test_same_node_and_device_with_different_clear_times_allowed(client):
+    """回归：同故障节点/同拒动设备、最大允许清除时间不同的场景必须共存，
+    不得再以“组合重复”拒绝整批。"""
+    body = _run(client, scenarios=[
+        {"name": "宽限30s", "fault_node": "B2", "refused_device": "CB2",
+         "max_clear_time": 30},
+        {"name": "严格0.5s", "fault_node": "B2", "refused_device": "CB2",
+         "max_clear_time": 0.5},
+    ])
+    by_name = {s["name"]: s for s in body["scenarios"]}
+    assert by_name["宽限30s"]["status"] == "pass"
+    assert by_name["严格0.5s"]["status"] == "over_limit"
+    # 两个场景的后备保护与故障范围一致，仅允许时间与判定不同
+    assert by_name["宽限30s"]["backup_protection"] == "CB1"
+    assert by_name["严格0.5s"]["backup_protection"] == "CB1"
+    assert by_name["宽限30s"]["max_clear_time_s"] == 30
+    assert by_name["严格0.5s"]["max_clear_time_s"] == 0.5
+    summary = body["summary"]
+    assert summary["scenario_count"] == 2
+    assert summary["pass_count"] == 1
+    assert summary["over_limit_count"] == 1
+    assert summary["undetermined_count"] == 0
 
 
 def test_empty_scenarios_returns_422(client):

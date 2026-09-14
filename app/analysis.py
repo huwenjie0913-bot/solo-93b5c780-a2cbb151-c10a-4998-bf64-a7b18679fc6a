@@ -169,13 +169,13 @@ def check_thermal_withstand(doc: ProjectDoc, views: dict[str, DeviceView]):
                     return "protection_curve_uncovered"
                 return None
 
-            def clear_t_hi(i):
-                # 最近上游保护的最慢清除边界：该电流下各适用保护段 t_hi 的最慢者
-                return max(b.t_hi(i) for b in seg_bands if b.covers_current(i))
-
-            def thermal_margin(log_i):
-                i = math.exp(log_i)
-                return wb.t_conservative(i) - clear_t_hi(i)
+            def clear_t_hi(i, active=None):
+                # 最近上游保护的最慢清除边界：该电流下各适用保护段 t_hi 的最慢者。
+                # 切点经 log/exp 往返可能有一个机器误差越界，边界采样点回退到
+                # 该可判定小区间中点处适用的保护段（插值端点外钳制，时间连续），
+                # 否则 max() 作用于空序列会中断整次校核。
+                bands = [b for b in seg_bands if b.covers_current(i)] or active
+                return max(b.t_hi(i) for b in bands)
 
             k = 0
             while k < len(cuts) - 1:
@@ -196,6 +196,14 @@ def check_thermal_withstand(doc: ProjectDoc, views: dict[str, DeviceView]):
                         "detail": _UNDETERMINED_DETAIL[reason],
                     })
                 else:
+                    mid_i = math.exp(0.5 * (math.log(a) + math.log(seg_hi))) \
+                        if seg_hi > a else a
+                    active = [b for b in seg_bands if b.covers_current(mid_i)]
+
+                    def thermal_margin(log_i, active=active):
+                        i = math.exp(log_i)
+                        return wb.t_conservative(i) - clear_t_hi(i, active)
+
                     ranges, minima = _scan_margin(
                         thermal_margin, a, seg_hi, rules.THERMAL_MARGIN_S)
                     for (rf, rt), (mm, mat) in zip(ranges, minima):
